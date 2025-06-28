@@ -173,8 +173,10 @@ async def handle_all_messages(message: types.Message, state: FSMContext):
         for i, item in enumerate(items, 1):
             text_cart += f"{i}. {item['name']} — {item['weight']}г — {item['price']:.2f}₽\n"
             total += item['price']
+        text_cart += f"\n💰 Общая сумма: {total:.2f}₽"
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout")]
+            [InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout")],
+            [InlineKeyboardButton(text="🗑️ Очистить корзину", callback_data="clear_cart")]
         ])
         await message.answer(text_cart, reply_markup=kb)
 
@@ -262,6 +264,13 @@ async def start_checkout(callback: types.CallbackQuery, state: FSMContext):
         ])
     )
     await state.set_state(DeliveryInfo.choosing_delivery)
+
+@dp.callback_query(F.data == "clear_cart")
+async def clear_cart(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    cart[user_id] = []
+    await callback.answer("🗑️ Корзина очищена!")
+    await callback.message.answer("🧺 Корзина пуста.")
 
 # ДОБАВЛЕНИЕ: Сохранение выбора и запрос данных
 # Убираем текстовый обработчик - оставляем только через кнопки
