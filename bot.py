@@ -1,5 +1,3 @@
-
-
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.enums import ParseMode
@@ -21,7 +19,10 @@ load_dotenv()
 import os
 
 API_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "935773354"))
+
+if not API_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в .env файле")
 
 
 class OrderForm(StatesGroup):
@@ -75,7 +76,7 @@ def save_order_to_excel(user_id, items, user_data):
     if not file_exists:
         wb = openpyxl.Workbook()
         ws = wb.active
-        ws.append(["ID", "Товары", "Сумма", "Прибыль", "Время", "Оплачен", "Данные пользователя"])
+        ws.append(["ID", "Товары", "Сумма", "Прибыль", "Время", "Оплачен", "Данные пользователя", "Детали товаров"])
     else:
         wb = openpyxl.load_workbook(file_name)
         ws = wb.active
@@ -86,22 +87,30 @@ def save_order_to_excel(user_id, items, user_data):
     profit = sum(item['profit'] for item in items)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Формируем детальную информацию о товарах
+    items_details = []
+    for item in items:
+        items_details.append(f"{item['name']} - {item['weight']}г - {item['price']:.2f}₽")
+    items_details_str = "\n".join(items_details)
+
     # Формируем строку с данными пользователя
     user_info = (
         f"Доставка: {user_data.get('delivery')}\n"
-        f"Оплата: {user_data.get('payment_method')}\n"
+        f"Оплата: {user_data.get('payment_method', 'Не указано')}\n"
         f"Данные: {user_data.get('buyerdata')}\n"
         f"Ник: @{user_data.get('username', 'не указан')}"
     )
+    
     # Записываем строку в таблицу
     ws.append([
         user_id,           # A - ID
-        names,             # B - Товары
+        names,             # B - Товары (кратко)
         round(total, 2),   # C - Сумма
         round(profit, 2),  # D - Прибыль
         timestamp,         # E - Время
         "Нет",             # F - Оплачен
-        user_info          # G - Данные пользователя
+        user_info,         # G - Данные пользователя
+        items_details_str  # H - Детали товаров
     ])
 
     wb.save(file_name)
@@ -287,25 +296,44 @@ async def save_delivery_info(message: types.Message, state: FSMContext):
         if not os.path.exists(file_name):
             wb = openpyxl.Workbook()
             ws = wb.active
-            ws.append(["User ID", "Username", "Способ доставки", "Данные", "Время"])
+            ws.append(["User ID", "Username", "Способ доставки", "Данные", "Время", "Заказ"])
             print("Создан новый файл Excel")
         else:
             wb = openpyxl.load_workbook(file_name)
             ws = wb.active
             print("Загружен существующий файл Excel")
 
-        ws.append([user_id, user_name, delivery_type, delivery_info, now])
+        # Получаем информацию о заказе
+        items = cart.get(user_id, [])
+        if items:
+            order_info = []
+            for item in items:
+                order_info.append(f"{item['name']} - {item['weight']}г - {item['price']:.2f}₽")
+            order_text = "\n".join(order_info)
+            total_sum = sum(item['price'] for item in items)
+            order_text += f"\n\nИтого: {total_sum:.2f}₽"
+        else:
+            order_text = "Корзина пуста"
+
+        ws.append([user_id, user_name, delivery_type, delivery_info, now, order_text])
         wb.save(file_name)
         print(f"Данные сохранены: {user_id}, {user_name}, {delivery_type}, {delivery_info}, {now}")
 
         # Показываем сообщение об успехе
         await message.answer("✅ Данные успешно сохранены в Excel!")
 
+        # Вычисляем сумму заказа
+        items = cart.get(user_id, [])
+        total_sum = sum(item['price'] for item in items) if items else 0
+        
+        # Сохраняем сумму в состоянии
+        await state.update_data(order_total=total_sum)
+
         # Переход к оплате
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="💳 Оплатить", callback_data="show_payment")]
         ])
-        await message.answer("Нажмите кнопку для оплаты:", reply_markup=kb)
+        await message.answer(f"Нажмите кнопку для оплаты (сумма: {total_sum:.2f}₽):", reply_markup=kb)
 
     except Exception as e:
         print(f"ОШИБКА при сохранении данных: {e}")
@@ -366,6 +394,10 @@ async def show_payment_info(callback: types.CallbackQuery, state: FSMContext):
     import random
     order_id = f"ORDER-{random.randint(10000, 99999)}"
     
+    # Получаем данные состояния
+    user_data = await state.get_data()
+    order_total = user_data.get("order_total", 0)
+    
     # Сохраняем ID заказа в состоянии
     await state.update_data(order_id=order_id)
     
@@ -377,7 +409,7 @@ async def show_payment_info(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"💳 <b>Оплата заказа {order_id}</b>\n\n"
         f"Номер карты: <code>1234 5678 9012 3456</code>\n"
-        f"Сумма к оплате: <b>100₽</b>\n\n"
+        f"Сумма к оплате: <b>{order_total:.2f}₽</b>\n\n"
         f"После оплаты нажмите кнопку ниже:",
         reply_markup=kb,
         parse_mode="HTML"
