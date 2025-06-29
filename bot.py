@@ -34,12 +34,41 @@ class DeliveryInfo(StatesGroup):
     entering_data = State()
 
 
+class AdminStates(StatesGroup):
+    waiting_for_broadcast_message = State()
 
 
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
 cart = {}
+# Список всех пользователей бота
+users = set()
+
+# Функции для работы с пользователями
+def save_users():
+    """Сохраняет список пользователей в файл"""
+    print(f"Сохраняю пользователей в файл: {users}")
+    with open("users.txt", "w", encoding="utf-8") as f:
+        for user_id in users:
+            f.write(f"{user_id}\n")
+
+def load_users():
+    """Загружает список пользователей из файла"""
+    try:
+        with open("users.txt", "r", encoding="utf-8") as f:
+            for line in f:
+                user_id = line.strip()
+                if user_id.isdigit():
+                    users.add(int(user_id))
+        print(f"Загружено пользователей из файла: {len(users)}")
+    except FileNotFoundError:
+        print("Файл users.txt не найден, начинаем с пустого списка")
+        pass  # Файл не существует, начинаем с пустого списка
+
+# Загружаем пользователей при запуске
+load_users()
+
 from aiogram.fsm.state import State, StatesGroup
 
 class OrderStates(StatesGroup):
@@ -134,8 +163,17 @@ async def handle_all_messages(message: types.Message, state: FSMContext):
         print("Состояние совпадает! Вызываем save_delivery_info")
         await save_delivery_info(message, state)
         return
+    if current_state == AdminStates.waiting_for_broadcast_message:
+        print("Состояние AdminStates.waiting_for_broadcast_message - передаем в handle_broadcast_message")
+        await handle_broadcast_message(message, state)
+        return
         
     if text == "/start":
+        # Добавляем пользователя в список
+        users.add(user_id)
+        print(f"Добавлен новый пользователь: {user_id}")
+        save_users()  # Сохраняем в файл
+        
         kb = ReplyKeyboardBuilder()
         kb.add(types.KeyboardButton(text="📦 Каталог"))
         kb.add(types.KeyboardButton(text="🛒 Корзина"))
@@ -187,11 +225,17 @@ async def handle_all_messages(message: types.Message, state: FSMContext):
         admin_kb = ReplyKeyboardMarkup(
             keyboard=[
                 [KeyboardButton(text="Заказы")],
+                [KeyboardButton(text="📢 Отправить пост всем")],
+                [KeyboardButton(text="🧪 Тестовая рассылка")],
                 [KeyboardButton(text="Назад")]
             ],
             resize_keyboard=True
         )
-        await message.answer("Добро пожаловать в админ-панель", reply_markup=admin_kb)
+        await message.answer(
+            f"Добро пожаловать в админ-панель\n\n"
+            f"👥 Всего пользователей: {len(users)}",
+            reply_markup=admin_kb
+        )
 
     elif text == "Заказы" and user_id == ADMIN_ID:
         if not cart:
@@ -204,6 +248,28 @@ async def handle_all_messages(message: types.Message, state: FSMContext):
                     text_orders += f"  {i}. {item['name']} — {item['weight']}г — {item['price']:.2f}₽\n"
                 text_orders += "\n"
             await message.answer(text_orders)
+
+    elif text == "📢 Отправить пост всем" and user_id == ADMIN_ID:
+        await message.answer(
+            "Введите сообщение, которое будет отправлено всем пользователям бота:\n\n"
+            "💡 Поддерживается HTML разметка\n"
+            "❌ Для отмены напишите 'отмена'"
+        )
+        await state.set_state(AdminStates.waiting_for_broadcast_message)
+
+    elif text == "🧪 Тестовая рассылка" and user_id == ADMIN_ID:
+        # Отправляем тестовое сообщение только администратору
+        try:
+            await message.answer("🧪 Тестовое сообщение для проверки работы бота")
+            await message.answer(
+                f"✅ Тестовая рассылка успешна!\n\n"
+                f"📊 Информация:\n"
+                f"👥 Всего пользователей в базе: {len(users)}\n"
+                f"🆔 Ваш ID: {user_id}\n"
+                f"📝 Пользователи: {list(users)[:5]}{'...' if len(users) > 5 else ''}"
+            )
+        except Exception as e:
+            await message.answer(f"❌ Ошибка тестовой рассылки: {e}")
 
     elif text == "Связь с администратором":
         await message.answer("Для связи с администратором напишите @jdueje")
@@ -456,8 +522,118 @@ async def confirm_payment(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer()
 
+@dp.message(AdminStates.waiting_for_broadcast_message)
+async def handle_broadcast_message(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    if message.text and message.text.lower() == "отмена":
+        await state.clear()
+        admin_kb = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Заказы")],
+                [KeyboardButton(text="📢 Отправить пост всем")],
+                [KeyboardButton(text="🧪 Тестовая рассылка")],
+                [KeyboardButton(text="Назад")]
+            ],
+            resize_keyboard=True
+        )
+        await message.answer("❌ Рассылка отменена", reply_markup=admin_kb)
+        return
+    
+    # Отправляем сообщение всем пользователям
+    success_count = 0
+    error_count = 0
+    
+    print(f"Начинаю рассылку. Всего пользователей: {len(users)}")
+    print(f"Список пользователей: {users}")
+    
+    if len(users) == 0:
+        await message.answer("❌ Нет пользователей для рассылки!")
+        await state.clear()
+        return
+    
+    await message.answer("📤 Начинаю рассылку...")
+    
+    for user_id in users:
+        try:
+            print(f"Отправляю сообщение пользователю {user_id}")
+            if message.photo:
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=message.photo[-1].file_id,
+                    caption=message.caption or "",
+                    parse_mode="HTML"
+                )
+            elif message.video:
+                await bot.send_video(
+                    chat_id=user_id,
+                    video=message.video.file_id,
+                    caption=message.caption or "",
+                    parse_mode="HTML"
+                )
+            elif message.document:
+                await bot.send_document(
+                    chat_id=user_id,
+                    document=message.document.file_id,
+                    caption=message.caption or "",
+                    parse_mode="HTML"
+                )
+            else:
+                # Исправляем ошибку с типом данных
+                text_content = message.text or ""
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=text_content,
+                    parse_mode="HTML"
+                )
+            success_count += 1
+            print(f"✅ Успешно отправлено пользователю {user_id}")
+            await asyncio.sleep(0.05)  # Небольшая задержка чтобы не спамить
+        except Exception as e:
+            error_count += 1
+            error_type = type(e).__name__
+            print(f"❌ Ошибка отправки пользователю {user_id}: {error_type} - {e}")
+            
+            # Проверяем конкретные типы ошибок
+            if "Forbidden" in str(e):
+                print(f"   Пользователь {user_id} заблокировал бота")
+            elif "Chat not found" in str(e):
+                print(f"   Чат с пользователем {user_id} не найден")
+            elif "User is deactivated" in str(e):
+                print(f"   Пользователь {user_id} деактивирован")
+            else:
+                print(f"   Неизвестная ошибка для пользователя {user_id}")
+    
+    print(f"Рассылка завершена. Успешно: {success_count}, Ошибок: {error_count}")
+    
+    # Очищаем состояние
+    await state.clear()
+    
+    # Возвращаем админ-панель
+    admin_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Заказы")],
+            [KeyboardButton(text="📢 Отправить пост всем")],
+            [KeyboardButton(text="🧪 Тестовая рассылка")],
+            [KeyboardButton(text="Назад")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        f"✅ Рассылка завершена!\n\n"
+        f"📊 Статистика:\n"
+        f"✅ Успешно отправлено: {success_count}\n"
+        f"❌ Ошибок: {error_count}\n"
+        f"👥 Всего пользователей: {len(users)}",
+        reply_markup=admin_kb
+    )
+
 # Запуск бота
 async def main():
+    print(f"Запуск бота. Загружено пользователей: {len(users)}")
+    print(f"Список пользователей: {users}")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
